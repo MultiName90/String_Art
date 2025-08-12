@@ -1,0 +1,16 @@
+{
+  "iter": 500,
+  "total": 500,
+  "elapsed_s": 180.242,
+  "lps": 2.774,
+  "eta_s": 0,
+  "last_gain": 136.67648315429688,
+  "last_from": 80,
+  "last_to": 169,
+  "outputs": {
+    "csv": "output\\string_art_sequence.csv",
+    "svg": "output\\string_art.svg",
+    "gif": "output\\string_art_video.gif",
+    "mp4": "output\\string_art_video.mp4"
+  }
+}

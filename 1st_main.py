@@ -1,10 +1,11 @@
-# 1st_main.py — String Art (análisis + vídeo línea a línea)
-# Autor: Fran + ChatGPT
+# 1st_main.py — String Art (greedy) con heartbeat, logs y snapshots
 # Requisitos: numpy, pillow, pandas, imageio
 #   pip install numpy pillow pandas imageio
 
 import os
 import math
+import json
+import time
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageOps
@@ -16,10 +17,13 @@ import imageio.v2 as imageio
 # =========================
 INPUT_DIR = "input"
 OUTPUT_DIR = "output"
+PROGRESS_DIR = os.path.join(OUTPUT_DIR, "progress")
+HEARTBEAT_FILE = os.path.join(OUTPUT_DIR, "heartbeat.json")
 
 # Crea carpetas si no existen
 os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(PROGRESS_DIR, exist_ok=True)
 
 # Parámetros principales
 W = H = 512               # tamaño de trabajo (cuadrado)
@@ -27,17 +31,28 @@ N_PEGS = 180              # número de clavos
 K_LINES = 2500             # número de hilos a trazar
 THREAD_WIDTH_PX = 1       # grosor visual del hilo (px) en el modelo
 THREAD_ALPHA = 0.03       # opacidad/aporte por hilo (0-1)
-FRAME_EVERY = 5           # añade 1 frame al vídeo cada N líneas
+
+# Vídeo / animación
+FRAME_EVERY = 5           # añade 1 frame al GIF/MP4 cada N líneas
 DRAW_FIRST_N_LINES = None # None = todas; o limita para vídeos ligeros
+
+# Instrumentación / debug
+LOG_EVERY = 20            # log a consola + heartbeat cada N líneas
+SNAPSHOT_EVERY = 100      # guardar PNG de progreso cada N líneas
 
 # Imagen personalizada (si quieres usar tu foto)
 USE_CUSTOM_IMAGE = True
 INPUT_IMAGE_PATH = os.path.join(INPUT_DIR, "mi_foto.png")
-
 if USE_CUSTOM_IMAGE and not os.path.exists(INPUT_IMAGE_PATH):
     print(f"⚠ No se encontró {INPUT_IMAGE_PATH}. "
           f"Coloca tu imagen en '{INPUT_DIR}/' o desactiva USE_CUSTOM_IMAGE. "
           f"Se usará una silueta de ejemplo.")
+
+# Rutas de salida
+CSV_PATH = os.path.join(OUTPUT_DIR, "string_art_sequence.csv")
+SVG_PATH = os.path.join(OUTPUT_DIR, "string_art.svg")
+GIF_PATH = os.path.join(OUTPUT_DIR, "string_art_video.gif")
+MP4_PATH = os.path.join(OUTPUT_DIR, "string_art_video.mp4")
 
 
 # =========================
@@ -92,6 +107,14 @@ def line_mask(w: int, h: int, p0: np.ndarray, p1: np.ndarray, width: int = 1) ->
     return (np.array(im).astype(np.float32) / 255.0)
 
 
+def fmt_eta(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 # =========================
 # ===== SOLVER GREEDY =====
 # =========================
@@ -101,19 +124,23 @@ def string_art_greedy(
     k_lines: int,
     thread_alpha: float,
     thread_px: int,
-    start_idx: int = 0
+    start_idx: int,
+    progress_cb=None,
+    snapshot_every: int | None = None
 ):
     """
     target: [H,W] en [0,1], 1 = oscuro que queremos cubrir
-    Devuelve: render, residual, sequence [(from,to), ...]
+    progress_cb: callback opcional -> progress_cb(iter_idx, total, frm, to, best_gain, elapsed_s, render_snapshot_or_None)
+    snapshot_every: si se define, enviará un render.copy() cada N iteraciones
     """
+    t0 = time.perf_counter()
     h, w = target.shape
     residual = target.copy()
     render = np.zeros_like(target, dtype=np.float32)
     sequence = []
     current = start_idx
 
-    for _ in range(k_lines):
+    for k in range(k_lines):
         best_gain = -1.0
         best_j = None
         best_mask = None
@@ -133,7 +160,16 @@ def string_art_greedy(
         render = np.clip(render + thread_alpha * best_mask, 0, 1)
         residual = np.clip(residual - thread_alpha * best_mask, 0, 1)
         sequence.append((current, best_j))
-        current = best_j
+        prev, current = current, best_j
+
+        # callback de progreso / snapshot
+        if progress_cb:
+            snap = None
+            iter_idx = k + 1
+            if snapshot_every and (iter_idx % snapshot_every == 0 or iter_idx == k_lines):
+                snap = render.copy()
+            elapsed_s = time.perf_counter() - t0
+            progress_cb(iter_idx, k_lines, prev, current, best_gain, elapsed_s, snap)
 
     return render, residual, sequence
 
@@ -183,7 +219,6 @@ def export_sequence(sequence, pegs, w, h,
     try:
         imageio.mimsave(mp4_path, [np.array(f) for f in frames], fps=20)
     except Exception:
-        # No interrumpe la ejecución si no es posible
         pass
 
 
@@ -191,34 +226,75 @@ def export_sequence(sequence, pegs, w, h,
 # ========= MAIN ==========
 # =========================
 def main():
-    # Rutas de salida
-    csv_path = os.path.join(OUTPUT_DIR, "string_art_sequence.csv")
-    svg_path = os.path.join(OUTPUT_DIR, "string_art.svg")
-    gif_path = os.path.join(OUTPUT_DIR, "string_art_video.gif")
-    mp4_path = os.path.join(OUTPUT_DIR, "string_art_video.mp4")
+    print("=== String Art (greedy) — debug en vivo ===")
+    print(f"Clavos: {N_PEGS} | Hilos: {K_LINES} | Alpha: {THREAD_ALPHA} | Width(px): {THREAD_WIDTH_PX}")
+    print(f"Log cada {LOG_EVERY} líneas | Snapshot cada {SNAPSHOT_EVERY} | FrameEvery={FRAME_EVERY}")
+    print(f"Imagen: {'custom' if USE_CUSTOM_IMAGE else 'silueta'} -> {INPUT_IMAGE_PATH if USE_CUSTOM_IMAGE else '-'}")
+    print("Salida en:", OUTPUT_DIR, "\n", flush=True)
 
-    # Carga imagen objetivo y genera clavos
     target = load_target_image(W, H, USE_CUSTOM_IMAGE, INPUT_IMAGE_PATH)
     pegs = make_pegs(N_PEGS, W, H)
 
-    # Resolver (greedy)
+    t0 = time.perf_counter()
+
+    def progress_cb(iter_idx, total, frm, to, best_gain, elapsed_s, snap):
+        # métricas
+        lps = iter_idx / max(1e-9, elapsed_s)  # lines per second
+        eta_s = (total - iter_idx) * (elapsed_s / iter_idx)
+
+        # log consola
+        if iter_idx == 1 or (iter_idx % LOG_EVERY == 0) or (iter_idx == total):
+            print(f"[{iter_idx:4d}/{total}] gain={best_gain:.1f} | "
+                  f"elapsed={elapsed_s:7.2f}s | lps={lps:5.2f} | ETA={fmt_eta(eta_s)}",
+                  flush=True)
+
+            # heartbeat
+            hb = {
+                "iter": int(iter_idx),
+                "total": int(total),
+                "elapsed_s": round(elapsed_s, 3),
+                "lps": round(lps, 3),
+                "eta_s": int(max(0, eta_s)),
+                "last_gain": float(best_gain),
+                "last_from": int(frm),
+                "last_to": int(to),
+                "outputs": {
+                    "csv": CSV_PATH, "svg": SVG_PATH, "gif": GIF_PATH, "mp4": MP4_PATH
+                }
+            }
+            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+                json.dump(hb, f, ensure_ascii=False, indent=2)
+
+        # snapshot
+        if snap is not None:
+            # guardamos imagen del render actual (0..1) como PNG
+            snap_img = (np.clip(snap, 0, 1) * 255).astype(np.uint8)
+            Image.fromarray(snap_img, mode="L").save(
+                os.path.join(PROGRESS_DIR, f"render_{iter_idx:04d}.png")
+            )
+
+    # Ejecuta solver
     render, residual, sequence = string_art_greedy(
         target, pegs,
         k_lines=K_LINES,
         thread_alpha=THREAD_ALPHA,
         thread_px=THREAD_WIDTH_PX,
-        start_idx=0
+        start_idx=0,
+        progress_cb=progress_cb,
+        snapshot_every=SNAPSHOT_EVERY
     )
 
-    # Exportar secuencia y animación
-    export_sequence(sequence, pegs, W, H, csv_path, svg_path, gif_path, mp4_path,
+    # Exporta resultados
+    export_sequence(sequence, pegs, W, H, CSV_PATH, SVG_PATH, GIF_PATH, MP4_PATH,
                     frame_every=FRAME_EVERY, draw_first_n=DRAW_FIRST_N_LINES)
 
-    print("✅ Listo.")
-    print(f"CSV: {csv_path}")
-    print(f"SVG: {svg_path}")
-    print(f"GIF: {gif_path}")
-    print(f"MP4: {mp4_path} (si no se generó, usa el GIF)")
+    elapsed = time.perf_counter() - t0
+    print("\n✅ Listo.")
+    print(f"Tiempo total: {elapsed:.2f}s")
+    print(f"CSV: {CSV_PATH}")
+    print(f"SVG: {SVG_PATH}")
+    print(f"GIF: {GIF_PATH}")
+    print(f"MP4: {MP4_PATH} (si no se generó, usa el GIF)")
 
 
 if __name__ == "__main__":
